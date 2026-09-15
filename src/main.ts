@@ -1,9 +1,9 @@
 import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl } from 'obsidian';
 import { ChatView } from './view';
-import { retrieve } from './retrieval';
+import { createRetriever } from './retrieval';
 import { buildRequest, parseCompletion } from './model';
 import { ModelSettingsModal } from './model-settings';
-import { type ChatHost, type PluginData, type Note, type Source } from './types';
+import { type ChatHost, type PluginData, type Source } from './types';
 import { restoreData, isExcluded } from './storage';
 
 const VIEW = 'the-last-brain-chat';
@@ -31,9 +31,11 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
 
   async openChat() {
     try {
-      const leaf = this.app.workspace.getLeavesOfType(VIEW)[0] ?? this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf(true);
+      const existing = this.app.workspace.getLeavesOfType(VIEW);
+      const leaf = existing.find(item => item.getRoot() === this.app.workspace.rootSplit) ?? this.app.workspace.getLeaf('tab');
       await leaf.setViewState({ type: VIEW, active: true });
       await this.app.workspace.revealLeaf(leaf);
+      for (const old of existing) if (old !== leaf && old.getRoot() !== this.app.workspace.rootSplit) old.detach();
     } catch { new Notice('无法打开聊天面板，请重试。'); }
   }
 
@@ -109,26 +111,35 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
     await this.app.workspace.getLeaf('tab').openFile(file, { active: true, state: { mode: 'preview' } });
   }
 
-  openModelSettings() { new ModelSettingsModal(this.app, this).open(); }
+  openModelSettings(theme?: 'dark' | 'light') { const modal = new ModelSettingsModal(this.app, this); if (theme) modal.modalEl.dataset.tlbTheme = theme; modal.open(); }
 
   openSettings() { new SettingsModal(this.app, this).open(); }
 
   private async readSources(query: string, settings = this.data.settings, cancelled = () => false) {
-    const notes: Note[] = [];
-    let skipped = 0;
-    let bytes = 0;
-    // ponytail: rescan up to 20 MB per request; add an incremental cache if real vault latency warrants it.
-    const files = this.app.vault.getMarkdownFiles().filter(f => !isExcluded(f.path, settings.excludedFolders)).sort((a, b) => a.path.localeCompare(b.path));
-    for (const file of files) {
+    const retriever = createRetriever(query, settings);
+    const allFiles = this.app.vault.getMarkdownFiles();
+    const files = allFiles.filter(f => !isExcluded(f.path, settings.excludedFolders));
+    const excluded = allFiles.length - files.length;
+    let failed = 0, lastProgress = 0;
+    // ponytail: reuse Obsidian's read cache and scan one note at a time; add a persistent index only if measured latency warrants it.
+    for (let i = 0; i < files.length; i++) {
       if (cancelled()) break;
-      if (file.stat.size > 1_000_000 || bytes + file.stat.size > 20_000_000) { skipped++; continue; }
-      bytes += file.stat.size;
-      try { notes.push({ path: file.path, text: await this.app.vault.cachedRead(file), mtime: file.stat.mtime }); }
-      catch { skipped++; }
+      const file = files[i];
+      let text: string | undefined;
+      try { text = await this.app.vault.cachedRead(file); }
+      catch { failed++; }
+      if (cancelled()) break;
+      if (text !== undefined) retriever.add({ path: file.path, text, mtime: file.stat.mtime });
+      if (i % 25 === 24) {
+        if (Date.now() - lastProgress > 200) {
+          this.status = `正在检索当前笔记库… ${i + 1} / ${files.length} 篇`;
+          this.refresh(); lastProgress = Date.now();
+        }
+        // Yield to the interface so stopping and resizing remain responsive during a full-vault scan.
+        await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+      }
     }
-    const result = retrieve(notes, query, settings);
-    result.skipped += skipped;
-    return result;
+    return { ...retriever.finish(), excluded, failed };
   }
 
   async send(text: string) { await this.run('chat', text.trim()); }
@@ -163,7 +174,8 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
       const query = conversation.messages.filter(m => m.role === 'user').slice(-3).map(m => m.content).join('\n').slice(-12000);
       const result = await this.readSources(query, settings, () => operation.cancelled || !this.alive);
       if (!this.alive || operation.cancelled) return;
-      this.status = `已检索 ${result.scanned} 篇 · 引用 ${result.sources.length} 个片段${result.skipped ? ` · 跳过 ${result.skipped} 篇（大小限制或读取失败）` : ''} · 等待模型回答…`;
+      const coverage = `已检索 ${result.scanned} 篇 · 引用 ${result.sources.length} 个片段${result.excluded ? ` · 已排除 ${result.excluded} 篇` : ''}${result.failed ? ` · 读取失败 ${result.failed} 篇` : ''}`;
+      this.status = `${coverage} · 等待模型回答…`;
       this.refresh();
       // Exclusions apply to old excerpts as well as newly read files.
       const allowed = (source: Source) => !isExcluded(source.path, settings.excludedFolders);
@@ -189,7 +201,7 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
       conversation.updatedAt = Date.now();
       try { await this.save(); }
       catch { this.data = before; throw new Error('回答已生成但本地保存失败，请检查磁盘后重试。'); }
-      this.status = `已检索 ${result.scanned} 篇 · 引用 ${result.sources.length} 个片段${result.skipped ? ` · 跳过 ${result.skipped} 篇（大小限制或读取失败）` : ''}${result.sources.length ? '' : ' · 未找到匹配笔记，回答缺少笔记依据'}${mode === 'memory' ? ' · 记忆草稿待确认' : ''}`;
+      this.status = `${coverage}${result.sources.length ? '' : ' · 未找到匹配笔记，回答缺少笔记依据'}${mode === 'memory' ? ' · 记忆草稿待确认' : ''}`;
     } catch (error) {
       if (operation.cancelled) return;
       // Do not surface request payloads, provider response bodies, or secrets in errors.
@@ -218,6 +230,6 @@ function renderSettings(container: HTMLElement, plugin: LastBrainPlugin) {
   new Setting(container).setName('模型配置').setDesc(plugin.data.settings.model || '选择服务并配置模型，密钥由 Obsidian 保存。').addButton(b => b.setButtonText('配置模型').onClick(() => plugin.openModelSettings()));
   new Setting(container).setName('排除目录').setDesc('每行一个路径，例如 私人/日记。不读取这些目录；历史对话中已发送的内容不会自动撤回，调整后请新建对话。').addTextArea(t => t.setValue(plugin.data.settings.excludedFolders).onChange(async value => { plugin.data.settings.excludedFolders = value; await persist(); }));
   new Setting(container).setName('最多引用片段').addDropdown(d => { for (const n of [3, 6, 10]) d.addOption(String(n), String(n)); d.setValue(String(plugin.data.settings.maxSources)).onChange(async value => { plugin.data.settings.maxSources = Number(value); await persist(); }); });
-  new Setting(container).setName('每次笔记上下文上限').setDesc('以字符数计；首版单文件最多 1 MB、每次读取最多 20 MB，跳过数量会显示。').addDropdown(d => { for (const n of [8000, 16000, 32000]) d.addOption(String(n), `${n.toLocaleString()} 字符`); d.setValue(String(plugin.data.settings.contextChars)).onChange(async value => { plugin.data.settings.contextChars = Number(value); await persist(); }); });
+  new Setting(container).setName('每次笔记上下文上限').setDesc('仅限制发送给模型的笔记片段总字符数；本地检索覆盖全部未排除的 Markdown 笔记，不按文件大小截断。').addDropdown(d => { for (const n of [8000, 16000, 32000]) d.addOption(String(n), `${n.toLocaleString()} 字符`); d.setValue(String(plugin.data.settings.contextChars)).onChange(async value => { plugin.data.settings.contextChars = Number(value); await persist(); }); });
   new Setting(container).setName('允许向配置的模型服务发送上下文').setDesc('仅在点击发送或沉淀记忆时传输问题、近期对话、相关笔记片段和确认记忆。可能按服务商规则计费。关闭后停止发起新请求。').addToggle(t => t.setValue(plugin.data.settings.networkConsent).onChange(async value => { plugin.data.settings.networkConsent = value; await persist(); }));
 }

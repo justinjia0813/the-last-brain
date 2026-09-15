@@ -34,7 +34,7 @@ export interface ChatHost {
   deleteMemory(id: string): Promise<void>;
   openSource(path: string): Promise<void>;
   openSettings(): void;
-  openModelSettings(): void;
+  openModelSettings(theme?: 'dark' | 'light'): void;
   updateMemory(id: string, content: string, confirm: boolean): Promise<void>;
   stop(): void;
 }

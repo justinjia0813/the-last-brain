@@ -8,7 +8,7 @@ Download [the latest release](https://github.com/justinjia0813/the-last-brain/re
 
 **Network and privacy:** The plugin calls only the OpenAI-compatible model endpoint you configure, and only when you send a message, request a memory draft, or explicitly test the connection. A connection test sends a fixed synthetic greeting and no vault content. It transmits your question, bounded recent history, retrieved Markdown excerpts, and relevant confirmed memories. A provider account, key, and payment may be required by your chosen service; an unauthenticated local model can also be used. There is no plugin subscription, telemetry, advertising, self-update mechanism, or access to files outside the current vault.
 
-Your notes are read-only. Chat history, source snapshots, and memories are stored in the plugin's own `data.json`; keys use Obsidian's secret storage. Model output is displayed as plain text, and no tools or file editing operations are exposed to the model. Memory drafts require confirmation before reuse. Lexical retrieval is limited to Markdown and does not guarantee complete vault coverage. Desktop macOS was tested with a synthetic local model; real provider quality and mobile behavior remain unverified.
+Your notes are read-only. Chat history, source snapshots, and memories are stored in the plugin's own `data.json`; keys use Obsidian's secret storage. Model output is displayed as safe text with headings, emphasis and source references, and no tools or file editing operations are exposed to the model. Memory drafts require confirmation before reuse. Lexical retrieval scans every readable Markdown note outside excluded folders on each request. It reuses Obsidian’s read cache and keeps only the highest-ranked excerpts; there is no per-file or per-vault byte cutoff. This does not guarantee semantic recall or send the whole vault to the model. Desktop macOS was tested with a synthetic local model; real provider quality and mobile behavior remain unverified.
 
 Licensed under the [MIT License](LICENSE). Bugs and feedback: [GitHub Issues](https://github.com/justinjia0813/the-last-brain/issues).
 
@@ -18,9 +18,9 @@ Licensed under the [MIT License](LICENSE). Bugs and feedback: [GitHub Issues](ht
 
 ## 安装与开始
 
-需要 **Obsidian 1.11.4 或更新版本**。当前版本为 0.2.0；[社区条目](https://community.obsidian.md/plugins/the-last-brain)的审核及更新显示可能晚于 GitHub 发布。
+需要 **Obsidian 1.11.4 或更新版本**。当前版本为 0.2.1；[社区条目](https://community.obsidian.md/plugins/the-last-brain)的审核及更新显示可能晚于 GitHub 发布。
 
-1. 下载并解压 [the-last-brain-0.2.0.zip](https://github.com/justinjia0813/the-last-brain/releases/download/0.2.0/the-last-brain-0.2.0.zip)，将整个 `the-last-brain` 文件夹放到目标库的 `.obsidian/plugins/` 下。文件夹中应有 `main.js`、`manifest.json`、`styles.css`。
+1. 下载并解压 [the-last-brain-0.2.1.zip](https://github.com/justinjia0813/the-last-brain/releases/download/0.2.1/the-last-brain-0.2.1.zip)，将整个 `the-last-brain` 文件夹放到目标库的 `.obsidian/plugins/` 下。文件夹中应有 `main.js`、`manifest.json`、`styles.css`。
 2. 在 Obsidian「设置 → 第三方插件」中启用 **The Last Brain**。若列表未更新，重启 Obsidian。
 3. 打开插件设置，填写**模型服务地址、模型名称、密钥**。地址兼容 OpenAI 的聊天接口，例如 `https://api.openai.com/v1`；本地模型服务可填 `http://localhost:11434/v1`。通过「配置模型」选择服务，填写后点「保存并使用」。也可主动测试连接，测试只发送固定问候，不发送笔记。不内置或捆绑任何模型额度。
 4. 按需要设置排除目录，并开启「允许向配置的模型服务发送上下文」。
@@ -53,16 +53,16 @@ Licensed under the [MIT License](LICENSE). Bugs and feedback: [GitHub Issues](ht
 | --- | --- |
 | 笔记读取 | 仅 Markdown 正文与路径；不解析附件，不抓取外部链接 |
 | 检索 | 中英文关键词、正文分块；默认最多 6 个来源，每篇笔记取最相关的一段 |
-| 规模 | 每个文件最多 1 MB，每次最多读取 20 MB；按路径顺序读取，超限或失败的跳过数量可见 |
+| 规模 | 逐篇检索全部未排除且可读取的 Markdown 笔记，无单篇或整库字节截断；分开显示检索、排除和读取失败数量 |
 | 笔记上下文 | 默认 16,000 字符上限，可选 8,000 / 16,000 / 32,000；每个候选片段最多约 1,200 字符 |
 | 对话上下文 | 当前问题最多 12,000 字符；历史最多 7 条、合计约 8,000 字符。完整历史仍保存在本地 |
 | 记忆沉淀 | 基于最近最多 7 条对话及相关笔记片段；不是无限长对话的全量总结 |
 | 记忆复用 | 仅相关且已确认的记忆，最多 4 条、正文约 6,000 字符 |
-| 输出 | 整段返回、纯文本展示；不渲染模型生成的网页、图片或可执行代码 |
+| 输出 | 整段返回，安全展示标题、强调和引用；不渲染模型生成的网页、图片或可执行代码 |
 | 请求 | 90 秒等待上限；可停止等待并丢弃迟到回答，但停止或超时不保证服务端已停止处理，重试可能额外计费 |
 | 已验证平台 | macOS 桌面版 Obsidian；移动端尚未实测 |
 
-关键词检索不保证同义词召回，也不能据此声称已完整阅读全库。首版未加入向量检索、附件解析、自动记忆或笔记编辑能力。
+本地检索覆盖全库 Markdown，但发送给模型的仍只是选中的片段，不能据此声称模型已完整阅读全库。关键词检索不保证同义词召回。首版未加入向量检索、附件解析、自动记忆或笔记编辑能力。
 
 ## 开发与验证
 
@@ -75,6 +75,6 @@ npm run check
 
 `tests/core.test.ts`、`tests/host.test.ts` 与 `tests/storage.test.ts` 检查检索、请求预算、来源隔离、记忆筛选、响应校验、历史恢复和损坏数据保护。
 
-0.2.0 的原生界面检查使用 `tests/native-ui.cjs` 和 `tests/model-settings-ui.cjs`，通过 Obsidian 命令行创建临时测试视图和内存设置，不更改真实对话或密钥；模型测试仅访问本机合成服务。脚本默认目标库为 workspace。旧版完整检索检查保留在 `tests/obsidian-smoke.cjs`，其界面选择器对应 0.1.0。详细结果见 [验收记录](docs/validation.md)。
+0.2.1 的原生界面检查使用 `tests/native-ui.cjs` 和 `tests/model-settings-ui.cjs`，通过 Obsidian 命令行创建临时测试视图和内存设置，不更改真实对话或密钥；模型测试仅访问本机合成服务。脚本默认目标库为 workspace。旧版完整检索检查保留在 `tests/obsidian-smoke.cjs`，其界面选择器对应 0.1.0。详细结果见 [验收记录](docs/validation.md)。
 
 开发接口依据 [Obsidian 官方示例插件](https://github.com/obsidianmd/obsidian-sample-plugin)和安装的官方类型定义；网络请求采用 [Obsidian requestUrl](https://docs.obsidian.md/Reference/TypeScript%20API/requestUrl)。

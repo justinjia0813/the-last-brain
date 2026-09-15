@@ -1,4 +1,4 @@
-import { App, Modal, requestUrl } from 'obsidian';
+import { App, Modal, requestUrl, setIcon } from 'obsidian';
 import { buildRequest, parseCompletion } from './model';
 import type { PluginData, Settings } from './types';
 
@@ -44,6 +44,8 @@ export class ModelSettingsModal extends Modal {
   private modelInput?: HTMLInputElement;
   private keyRow?: HTMLElement;
   private controlsRoot?: HTMLElement;
+  private providerDescription?: HTMLElement;
+  private addressDetails?: HTMLDetailsElement;
 
   constructor(app: App, private plugin: SettingsPlugin) {
     super(app);
@@ -56,10 +58,9 @@ export class ModelSettingsModal extends Modal {
 
   onOpen() {
     this.modalEl.addClass('tlb-model-modal');
-    this.titleEl.setText('模型服务设置');
+    this.titleEl.setText('模型配置');
     const root = this.contentEl.createDiv({ cls: 'tlb-model-settings' });
     this.controlsRoot = root;
-    root.createEl('p', { text: '设置仅在点击保存后生效。连接测试会向所选服务发送一条固定的测试问候语，可能产生服务费用；请求最长等待 15 秒。' });
 
     const providerRow = root.createDiv({ cls: 'tlb-model-field' });
     providerRow.createEl('label', { text: '服务提供方', attr: { for: 'tlb-provider' } });
@@ -68,15 +69,28 @@ export class ModelSettingsModal extends Modal {
     select.value = this.provider;
     select.addEventListener('change', () => this.changeProvider(select.value as Provider));
 
+    this.providerDescription = root.createEl('p', { cls: 'tlb-model-provider-description' });
+    this.renderProviderDescription();
+
     const modelRow = root.createDiv({ cls: 'tlb-model-field' });
     modelRow.createEl('label', { text: '模型名称', attr: { for: 'tlb-model' } });
-    this.modelInput = modelRow.createEl('input', { type: 'text', attr: { id: 'tlb-model', placeholder: '填写服务支持的模型名称', autocomplete: 'off' } });
+    this.modelInput = modelRow.createEl('input', { type: 'text', attr: { id: 'tlb-model', placeholder: '填写服务支持的模型名称', autocomplete: 'off', list: `tlb-models-${this.provider}` } });
+    const suggestions: Partial<Record<Provider, string[]>> = {
+      openai: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o'],
+      deepseek: ['deepseek-flash', 'deepseek-v4-pro'],
+      ollama: ['gpt-oss:20b'],
+    };
+    const modelList = modelRow.createEl('datalist', { attr: { id: `tlb-models-${this.provider}` } });
+    (suggestions[this.provider] ?? []).forEach(name => modelList.createEl('option', { attr: { value: name } }));
     this.modelInput.value = this.draft.model;
     this.modelInput.addEventListener('input', () => { this.draft.model = this.modelInput!.value; this.edited(); });
 
     const urlRow = root.createDiv({ cls: 'tlb-model-field' });
-    urlRow.createEl('label', { text: '服务地址', attr: { for: 'tlb-url' } });
-    this.urlInput = urlRow.createEl('input', { type: 'url', attr: { id: 'tlb-url', placeholder: 'https://example.com/v1', autocomplete: 'url' } });
+    const address = urlRow.createEl('details', { cls: 'tlb-model-address' });
+    this.addressDetails = address;
+    address.createEl('summary', { text: '服务地址' });
+    address.createEl('label', { text: '服务地址', attr: { for: 'tlb-url' } });
+    this.urlInput = address.createEl('input', { type: 'url', attr: { id: 'tlb-url', placeholder: 'https://example.com/v1', autocomplete: 'url' } });
     this.urlInput.value = this.draft.baseUrl;
     this.urlInput.addEventListener('input', () => {
       const previousUrl = cleanUrl(this.draft.baseUrl);
@@ -89,29 +103,34 @@ export class ModelSettingsModal extends Modal {
       this.renderKeyState();
     });
     this.urlInput.addEventListener('blur', () => { this.syncSecretIdentity(); this.renderKeyState(); });
+    this.renderAddressDetails();
 
     const keyRow = root.createDiv({ cls: 'tlb-model-field' });
     this.keyRow = keyRow;
     keyRow.createEl('label', { text: providers[this.provider].cloud ? '服务密钥' : '服务密钥（可选）', attr: { for: 'tlb-key' } });
     const keyControls = keyRow.createDiv({ cls: 'tlb-model-key-row' });
-    this.keyInput = keyControls.createEl('input', { type: 'password', attr: { id: 'tlb-key', autocomplete: 'new-password', placeholder: '输入新密钥；留空则保留已保存密钥' } });
+    this.keyInput = keyControls.createEl('input', { type: 'password', attr: { id: 'tlb-key', autocomplete: 'off', placeholder: '输入服务密钥' } });
     this.keyInput.addEventListener('input', () => { this.typedKey = this.keyInput!.value; this.edited(); });
-    const reveal = keyControls.createEl('button', { text: '显示', attr: { type: 'button', 'aria-label': '显示密钥' } });
+    const reveal = keyControls.createEl('button', { attr: { type: 'button', 'aria-label': '显示密钥' } });
+    setIcon(reveal, 'eye');
     reveal.addEventListener('click', () => {
       this.revealKey = !this.revealKey;
       this.keyInput!.type = this.revealKey ? 'text' : 'password';
-      reveal.textContent = this.revealKey ? '隐藏' : '显示';
+      setIcon(reveal, this.revealKey ? 'eye-off' : 'eye');
       reveal.setAttribute('aria-label', this.revealKey ? '隐藏密钥' : '显示密钥');
     });
     const keyState = keyRow.createDiv({ cls: 'tlb-model-help' });
     keyState.dataset.keyState = 'true';
+    keyRow.createDiv({ cls: 'tlb-model-help', text: '密钥仅保存在 Obsidian 密钥存储中，不会写入插件设置文件。留空可继续使用已保存的密钥。' });
     this.renderKeyState();
+    root.append(this.providerDescription);
+    root.createEl('p', { cls: 'tlb-model-disclosure', text: '测试连接仅发送固定问候语，不包含笔记；可能产生服务费用，最长等待 15 秒。' });
     this.message = root.createDiv({ cls: 'tlb-model-message', attr: { role: 'status', 'aria-live': 'polite' } });
     const actions = root.createDiv({ cls: 'tlb-model-actions' });
-    this.testButton = actions.createEl('button', { text: '测试连接', attr: { type: 'button' } });
-    this.testButton.addEventListener('click', () => { void this.testConnection(); });
     const cancel = actions.createEl('button', { text: '取消', attr: { type: 'button' } });
     cancel.addEventListener('click', () => this.close());
+    this.testButton = actions.createEl('button', { text: '测试连接', attr: { type: 'button' } });
+    this.testButton.addEventListener('click', () => { void this.testConnection(); });
     const saveButton = actions.createEl('button', { text: '保存并使用', cls: 'mod-cta', attr: { type: 'button' } });
     saveButton.addEventListener('click', () => { void this.saveDraft(); });
     this.updateKeyVisibility();
@@ -149,11 +168,46 @@ export class ModelSettingsModal extends Modal {
     this.revealKey = false;
     if (this.keyInput) this.keyInput.type = 'password';
     const reveal = this.contentEl.querySelector<HTMLButtonElement>('[aria-label="显示密钥"], [aria-label="隐藏密钥"]');
-    if (reveal) { reveal.textContent = '显示'; reveal.setAttribute('aria-label', '显示密钥'); }
+    if (reveal) { setIcon(reveal, 'eye'); reveal.setAttribute('aria-label', '显示密钥'); }
     this.updateKeyVisibility();
     this.providerDrafts.set(provider, this.captureProviderDraft());
     this.edited();
+    this.renderProviderDescription();
+    this.renderAddressDetails();
+    this.renderModelSuggestions();
     this.renderKeyState();
+  }
+
+  private renderProviderDescription() {
+    if (!this.providerDescription) return;
+    this.providerDescription.textContent = this.provider === 'custom'
+      ? '可连接兼容 OpenAI 接口格式的服务。'
+      : this.provider === 'ollama'
+        ? '连接正在运行的本机 Ollama 服务。'
+        : `使用 ${providers[this.provider].label} 的预设服务地址。`;
+  }
+
+  private renderAddressDetails() {
+    if (!this.addressDetails) return;
+    const cloud = providers[this.provider].cloud;
+    this.addressDetails.open = !cloud;
+    this.addressDetails.querySelector('summary')!.textContent = cloud ? '高级设置 · 服务地址（已自动填写）' : '服务地址';
+  }
+
+  private renderModelSuggestions() {
+    if (!this.modelInput) return;
+    const suggestions: Partial<Record<Provider, string[]>> = {
+      openai: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o'],
+      deepseek: ['deepseek-flash', 'deepseek-v4-pro'],
+      ollama: ['gpt-oss:20b'],
+    };
+    const list = this.modelInput.list;
+    if (!list) return;
+    list.replaceChildren(...(suggestions[this.provider] ?? []).map(name => {
+      const option = document.createElement('option');
+      option.value = name;
+      return option;
+    }));
   }
 
   private edited() {
@@ -188,7 +242,7 @@ export class ModelSettingsModal extends Modal {
     const el = this.contentEl.querySelector<HTMLElement>('[data-key-state]');
     if (!el) return;
     const stored = !!this.currentStoredKey();
-    el.textContent = stored ? '此服务地址已有密钥保存在 Obsidian 中；密钥内容不会显示。' : '密钥由 Obsidian SecretStorage 保存，不写入插件对话数据。';
+    el.textContent = stored ? '此服务地址已有密钥保存在 Obsidian 密钥存储中；密钥内容不会显示。' : '尚未为此服务地址保存密钥。';
   }
 
   private validate(apiKey: string) {

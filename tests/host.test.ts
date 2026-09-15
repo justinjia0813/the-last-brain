@@ -45,7 +45,7 @@ before(async () => {
       if (name === 'obsidian') return obsidian;
       if (name === './model-settings') return { ModelSettingsModal: ModalStub };
       throw new Error(`Unexpected module ${name}`);
-  }, crypto: { randomUUID }, structuredClone, setTimeout, clearTimeout, URL,
+  }, crypto: { randomUUID }, structuredClone, setTimeout, clearTimeout, URL, window: { setTimeout },
   });
   LastBrainPlugin = module.exports.default;
 });
@@ -167,4 +167,33 @@ test('loads prior plugin data and applies current defaults', { timeout: 5000 }, 
   assert.equal(plugin.data.conversations[0].messages[0].content, 'old question');
   assert.equal(plugin.data.settings.networkConsent, false);
   assert.equal(plugin.data.settings.contextChars, 16000);
+});
+
+test('chat searches past the old vault and single-file limits and reports exclusions separately from failures', { timeout: 5000 }, async () => {
+  const files = [
+    ...Array.from({ length: 21 }, (_, i) => ({ path: `a-${String(i).padStart(2, '0')}.md`, stat: { size: 1_000_000, mtime: 1 } })),
+    { path: 'z-late-large.md', stat: { size: 1_500_000, mtime: 1 } },
+    { path: 'broken.md', stat: { size: 10, mtime: 1 } },
+    { path: 'Private/hidden.md', stat: { size: 10, mtime: 1 } },
+  ];
+  const read: string[] = [];
+  const { plugin, nextRequest } = makePlugin({ files, cachedRead: async file => {
+    read.push(file.path);
+    if (file.path === 'broken.md') throw Error('unreadable');
+    return file.path === 'z-late-large.md' ? 'latecoverage unique source evidence' : 'unrelated filler';
+  } });
+  consent(plugin);
+  plugin.data.settings.excludedFolders = 'Private';
+  const sending = plugin.send('latecoverage');
+  const pending = await waitForRequest(nextRequest, sending, plugin);
+  pending.resolve(reply());
+  await sending;
+  assert.equal(read.length, 23);
+  assert.ok(read.includes('z-late-large.md'));
+  assert.ok(!read.includes('Private/hidden.md'));
+  assert.match(pending.request.body, /latecoverage unique source evidence/);
+  assert.match(plugin.status, /已检索 22 篇/);
+  assert.match(plugin.status, /已排除 1 篇/);
+  assert.match(plugin.status, /读取失败 1 篇/);
+  assert.doesNotMatch(plugin.status, /大小限制|跳过/);
 });

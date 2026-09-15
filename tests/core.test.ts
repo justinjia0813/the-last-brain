@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { retrieve } from '../src/retrieval';
+import { createRetriever, retrieve } from '../src/retrieval';
 import { buildRequest, parseCompletion } from '../src/model';
 import { DEFAULT_SETTINGS, type CompletionInput, type Note } from '../src/types';
 
@@ -36,6 +36,26 @@ test('counts only excluded notes as skipped, returns body for title hits and gua
   assert.equal(result.skipped, 1);
   const titled = retrieve([{ path: 'Research/title-match.md', text: 'First body paragraph.', mtime: 1 }], 'title-match', settings);
   assert.equal(titled.sources[0].text, 'First body paragraph.');
+});
+
+test('retrieves a marker after more than one megabyte in a single note', () => {
+  const result = retrieve([
+    { path: 'notes/large.md', text: `${'x'.repeat(1_100_000)} late marker`, mtime: 1 },
+  ], 'late marker', { ...settings, maxSources: 1 });
+  assert.equal(result.sources[0].path, 'notes/large.md');
+  assert.match(result.sources[0].text, /late marker/);
+});
+
+test('keeps the strongest last note after streaming more than twenty megabytes', () => {
+  const retriever = createRetriever('alpha beta', { ...settings, maxSources: 1 });
+  for (let i = 0; i < 21; i++) {
+    retriever.add({ path: `notes/${String(i).padStart(2, '0')}.md`, text: `${'x'.repeat(1_000_000)} alpha`, mtime: i });
+  }
+  retriever.add({ path: 'notes/last.md', text: `${'x'.repeat(1_000_000)} alpha beta`, mtime: 22 });
+  const result = retriever.finish();
+  assert.equal(result.scanned, 22);
+  assert.equal(result.sources[0].path, 'notes/last.md');
+  assert.match(result.sources[0].text, /alpha beta/);
 });
 
 function input(overrides: Partial<CompletionInput> = {}): CompletionInput {

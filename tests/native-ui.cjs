@@ -12,14 +12,14 @@ function evaluate(code) {
 try {
   evaluate(`
     const p=app.plugins.plugins['the-last-brain'];
-    if(p.manifest.version!=='0.2.0') throw Error('Install 0.2.0 first');
+    if(p.manifest.version!==${JSON.stringify(require('../manifest.json').version)}) throw Error('Install current build first');
     const real=app.workspace.getLeavesOfType('the-last-brain-chat')[0].view;
     const leaf=app.workspace.getLeaf('tab');
     const data={version:1,settings:{...p.data.settings,model:'测试模型',baseUrl:'http://localhost:11434/v1',secretName:'test-only',networkConsent:false},conversations:[],memories:[],activeConversationId:null};
     const host={data,busy:false,status:'独立界面测试',error:'',save:async()=>{},refresh:()=>view.refresh(),
       newConversation:async()=>{const id=crypto.randomUUID();data.conversations.unshift({id,title:'测试对话',createdAt:1,updatedAt:1,messages:[]});data.activeConversationId=id;view.refresh()},
       selectConversation:async id=>{data.activeConversationId=id;view.refresh()},deleteConversation:async()=>{},
-      send:async text=>{if(!data.activeConversationId)await host.newConversation();const c=data.conversations.find(c=>c.id===data.activeConversationId);c.messages.push({id:crypto.randomUUID(),role:'user',content:text,createdAt:1,sources:[]},{id:crypto.randomUUID(),role:'assistant',content:'测试回答 <img src=x onerror=alert(1)>',createdAt:2,sources:[]});view.refresh()},
+      send:async text=>{if(!data.activeConversationId)await host.newConversation();const c=data.conversations.find(c=>c.id===data.activeConversationId);c.messages.push({id:crypto.randomUUID(),role:'user',content:text,createdAt:1,sources:[]},{id:crypto.randomUUID(),role:'assistant',content:'## 标题\\n正文 **强调 <img src=x onerror=alert(1)>**',createdAt:2,sources:[]});view.refresh()},
       distill:async()=>{data.memories.unshift({id:'qa-memory',conversationId:data.activeConversationId,content:'待审阅内容',sources:[],createdAt:1,status:'draft'});view.refresh()},
       confirmMemory:async id=>{data.memories.find(m=>m.id===id).status='confirmed';view.refresh()},
       updateMemory:async(id,content,confirm)=>{if(host.failSave)throw Error('测试保存失败');Object.assign(data.memories.find(m=>m.id===id),{content,status:confirm?'confirmed':'draft'});view.refresh()},
@@ -36,6 +36,7 @@ try {
     root.querySelector('.tlb-send').click();await new Promise(r=>setTimeout(r,50));
     if(host.data.conversations[0].messages.length!==2)throw Error('Send failed');
     if(root.querySelector('.tlb-message-content img'))throw Error('Unsafe output');
+    if(!root.querySelector('.tlb-answer h3')||!root.querySelector('.tlb-answer strong'))throw Error('Safe formatting absent');
     if(root.querySelector('.tlb-retry'))throw Error('Completed answer must not show retry');
     return JSON.stringify({send:true,draft:true,safeText:true});
   `);
@@ -47,6 +48,7 @@ try {
       const r=root.getBoundingClientRect(), composer=root.querySelector('.tlb-composer-wrap').getBoundingClientRect();
       const input=root.querySelector('textarea');input.value='尺寸草稿';input.dispatchEvent(new Event('input',{bubbles:true}));view.refresh();
       if(root.querySelector('textarea').value!=='尺寸草稿')throw Error('Resize draft lost');
+      if(${width}<800){root.querySelector('[aria-label=\"展开历史\"]').click();const close=root.querySelector('[aria-label=\"收起历史\"]');const c=close.getBoundingClientRect();if(c.right>r.right+1)throw Error('Sidebar close out of bounds');close.click();if(!root.querySelector('[aria-label=\"展开历史\"]'))throw Error('Sidebar did not close');}
       if(root.scrollWidth>root.clientWidth+1)throw Error('Horizontal overflow');
       if(composer.bottom>r.bottom+1)throw Error('Composer below panel');
       return JSON.stringify({width:${width},height:${height},overflow:root.scrollWidth-root.clientWidth});
