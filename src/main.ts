@@ -2,7 +2,8 @@ import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl } fro
 import { ChatView } from './view';
 import { retrieve } from './retrieval';
 import { buildRequest, parseCompletion } from './model';
-import { DEFAULT_SETTINGS, type ChatHost, type PluginData, type Note, type Source } from './types';
+import { ModelSettingsModal } from './model-settings';
+import { type ChatHost, type PluginData, type Note, type Source } from './types';
 import { restoreData, isExcluded } from './storage';
 
 const VIEW = 'the-last-brain-chat';
@@ -15,6 +16,7 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
   error = '';
   private saves: Promise<void> = Promise.resolve();
   private alive = true;
+  private operation?: { cancelled: boolean; cancelWait?: () => void };
 
   async onload() {
     try { this.data = restoreData(await this.loadData()); }
@@ -25,7 +27,7 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
     this.addSettingTab(new BrainSettings(this.app, this));
   }
 
-  onunload() { this.alive = false; }
+  onunload() { this.alive = false; this.stop(); }
 
   async openChat() {
     try {
@@ -76,6 +78,27 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
     });
   }
 
+  async updateMemory(memoryId: string, content: string, confirm: boolean) {
+    const text = content.trim();
+    if (!text || text.length > 64000) throw new Error('记忆内容须为 1–64,000 个字符。');
+    if (this.busy) throw new Error('正在处理，请稍后保存记忆。');
+    await this.change(() => {
+      const memory = this.data.memories.find(m => m.id === memoryId);
+      if (!memory) throw new Error('记忆已不存在。');
+      memory.content = text;
+      memory.status = confirm ? 'confirmed' : 'draft';
+    });
+    if (this.error) throw new Error(this.error);
+  }
+
+  stop() {
+    if (!this.operation) return;
+    this.operation.cancelled = true;
+    this.operation.cancelWait?.();
+    this.status = '正在停止等待…';
+    this.refresh();
+  }
+
   async confirmMemory(memoryId: string) { await this.change(() => { const memory = this.data.memories.find(m => m.id === memoryId); if (memory) memory.status = 'confirmed'; }); }
   async deleteMemory(memoryId: string) { await this.change(() => { this.data.memories = this.data.memories.filter(m => m.id !== memoryId); }); }
 
@@ -86,15 +109,18 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
     await this.app.workspace.getLeaf('tab').openFile(file, { active: true, state: { mode: 'preview' } });
   }
 
+  openModelSettings() { new ModelSettingsModal(this.app, this).open(); }
+
   openSettings() { new SettingsModal(this.app, this).open(); }
 
-  private async readSources(query: string, settings = this.data.settings) {
+  private async readSources(query: string, settings = this.data.settings, cancelled = () => false) {
     const notes: Note[] = [];
     let skipped = 0;
     let bytes = 0;
     // ponytail: rescan up to 20 MB per request; add an incremental cache if real vault latency warrants it.
     const files = this.app.vault.getMarkdownFiles().filter(f => !isExcluded(f.path, settings.excludedFolders)).sort((a, b) => a.path.localeCompare(b.path));
     for (const file of files) {
+      if (cancelled()) break;
       if (file.stat.size > 1_000_000 || bytes + file.stat.size > 20_000_000) { skipped++; continue; }
       bytes += file.stat.size;
       try { notes.push({ path: file.path, text: await this.app.vault.cachedRead(file), mtime: file.stat.mtime }); }
@@ -114,6 +140,8 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
     if (!this.data.settings.networkConsent) { this.error = '请先在设置中确认：提问会将问题、近期对话、相关笔记片段和记忆发送到你配置的模型服务。'; this.refresh(); return; }
     let conversation = this.data.conversations.find(c => c.id === this.data.activeConversationId);
     if (mode === 'memory' && !conversation?.messages.some(m => m.role === 'assistant')) { this.error = '先完成一轮问答，再沉淀记忆。'; this.refresh(); return; }
+    const operation = { cancelled: false } as { cancelled: boolean; cancelWait?: () => void };
+    this.operation = operation;
     this.busy = true; this.error = ''; this.status = '正在检索当前笔记库…'; this.refresh();
     try {
       const settings = { ...this.data.settings };
@@ -131,9 +159,10 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
         conversation.updatedAt = Date.now();
         await this.save();
       }
+      if (operation.cancelled || !this.alive) return;
       const query = conversation.messages.filter(m => m.role === 'user').slice(-3).map(m => m.content).join('\n').slice(-12000);
-      const result = await this.readSources(query, settings);
-      if (!this.alive) return;
+      const result = await this.readSources(query, settings, () => operation.cancelled || !this.alive);
+      if (!this.alive || operation.cancelled) return;
       this.status = `已检索 ${result.scanned} 篇 · 引用 ${result.sources.length} 个片段${result.skipped ? ` · 跳过 ${result.skipped} 篇（大小限制或读取失败）` : ''} · 等待模型回答…`;
       this.refresh();
       // Exclusions apply to old excerpts as well as newly read files.
@@ -146,12 +175,14 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
       try {
         response = await Promise.race([
           requestUrl({ ...request, method: 'POST', throw: false }),
+          new Promise<never>((_, reject) => { operation.cancelWait = () => reject(new Error('stopped')); }),
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('等待模型超时（90 秒），请稍后重试。')), 90000); }),
         ]);
       } finally { clearTimeout(timer); }
-      if (!this.alive) return;
+      if (!this.alive || operation.cancelled) return;
       if (response.status < 200 || response.status >= 300) throw new Error(response.status === 401 || response.status === 403 ? '模型鉴权失败，请检查密钥和模型权限。' : response.status === 429 ? '模型服务限流或额度不足，请稍后重试。' : `模型服务返回错误（${response.status}），请检查服务地址及模型名称。`);
       const answer = parseCompletion(response.json);
+      this.operation = undefined; // The accepted result is now being saved; do not interrupt persistence.
       const before = structuredClone(this.data);
       if (mode === 'chat') conversation.messages.push({ id: id(), role: 'assistant', content: answer, createdAt: Date.now(), sources: result.sources });
       else this.data.memories.unshift({ id: id(), conversationId: conversation.id, content: answer, sources: result.sources, createdAt: Date.now(), status: 'draft' });
@@ -160,10 +191,14 @@ export default class LastBrainPlugin extends Plugin implements ChatHost {
       catch { this.data = before; throw new Error('回答已生成但本地保存失败，请检查磁盘后重试。'); }
       this.status = `已检索 ${result.scanned} 篇 · 引用 ${result.sources.length} 个片段${result.skipped ? ` · 跳过 ${result.skipped} 篇（大小限制或读取失败）` : ''}${result.sources.length ? '' : ' · 未找到匹配笔记，回答缺少笔记依据'}${mode === 'memory' ? ' · 记忆草稿待确认' : ''}`;
     } catch (error) {
+      if (operation.cancelled) return;
       // Do not surface request payloads, provider response bodies, or secrets in errors.
       this.error = error instanceof Error && /^(请|模型|等待模型|回答|服务|不支持|无效|API|Base|模型名称)/.test(error.message) ? error.message : '请求或本地保存失败。请检查服务配置、网络和磁盘空间后重试。';
       this.status = '';
-    } finally { this.busy = false; this.refresh(); }
+    } finally {
+      if (operation.cancelled) { this.error = ''; this.status = '已停止等待。服务端可能仍在处理或计费，迟到的回答不会保存。'; }
+      this.operation = undefined; this.busy = false; this.refresh();
+    }
   }
 }
 
@@ -180,16 +215,7 @@ class BrainSettings extends PluginSettingTab {
 function renderSettings(container: HTMLElement, plugin: LastBrainPlugin) {
   container.createEl('p', { text: '对当前笔记库只读；对话与记忆保存在插件自身数据中。当前版本检索 Markdown 笔记。' });
   const persist = async () => { try { await plugin.save(); plugin.refresh(); } catch { new Notice('设置保存失败，请检查磁盘空间。'); } };
-  new Setting(container).setName('模型服务地址').setDesc('填写兼容接口根地址，例如 https://api.openai.com/v1 或 http://localhost:11434/v1。').addText(t => t.setValue(plugin.data.settings.baseUrl).setPlaceholder(DEFAULT_SETTINGS.baseUrl).onChange(async value => { plugin.data.settings.baseUrl = value.trim(); await persist(); }));
-  new Setting(container).setName('模型名称').setDesc('填写服务商提供的完整模型名。').addText(t => t.setValue(plugin.data.settings.model).setPlaceholder('例如你的服务商模型 ID').onChange(async value => { plugin.data.settings.model = value.trim(); await persist(); }));
-  new Setting(container).setName('密钥存储名称').setDesc('仅用小写字母、数字和短横线；密钥由 Obsidian 管理，不写入本插件的对话数据。').addText(t => t.setValue(plugin.data.settings.secretName).onChange(async value => { const name = value.trim(); if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) return; plugin.data.settings.secretName = name; await persist(); }));
-  let newKey = '';
-  new Setting(container).setName('更新服务密钥').setDesc('输入后点击保存。本地无鉴权服务可不设置。').addText(t => { t.inputEl.type = 'password'; t.inputEl.autocomplete = 'off'; t.setPlaceholder('输入新密钥').onChange(value => { newKey = value.trim(); }); }).addButton(b => b.setButtonText('保存密钥').onClick(() => {
-    if (!newKey) { new Notice('请先输入密钥。'); return; }
-    try { plugin.app.secretStorage.setSecret(plugin.data.settings.secretName, newKey); new Notice('密钥已保存到 Obsidian。'); }
-    catch { new Notice('密钥保存失败，请检查存储名称。'); }
-  }));
-  new Setting(container).setName('清除已保存密钥').addButton(b => b.setButtonText('清除密钥').onClick(() => { plugin.app.secretStorage.setSecret(plugin.data.settings.secretName, ''); new Notice('已清除当前名称的密钥。'); }));
+  new Setting(container).setName('模型配置').setDesc(plugin.data.settings.model || '选择服务并配置模型，密钥由 Obsidian 保存。').addButton(b => b.setButtonText('配置模型').onClick(() => plugin.openModelSettings()));
   new Setting(container).setName('排除目录').setDesc('每行一个路径，例如 私人/日记。不读取这些目录；历史对话中已发送的内容不会自动撤回，调整后请新建对话。').addTextArea(t => t.setValue(plugin.data.settings.excludedFolders).onChange(async value => { plugin.data.settings.excludedFolders = value; await persist(); }));
   new Setting(container).setName('最多引用片段').addDropdown(d => { for (const n of [3, 6, 10]) d.addOption(String(n), String(n)); d.setValue(String(plugin.data.settings.maxSources)).onChange(async value => { plugin.data.settings.maxSources = Number(value); await persist(); }); });
   new Setting(container).setName('每次笔记上下文上限').setDesc('以字符数计；首版单文件最多 1 MB、每次读取最多 20 MB，跳过数量会显示。').addDropdown(d => { for (const n of [8000, 16000, 32000]) d.addOption(String(n), `${n.toLocaleString()} 字符`); d.setValue(String(plugin.data.settings.contextChars)).onChange(async value => { plugin.data.settings.contextChars = Number(value); await persist(); }); });
