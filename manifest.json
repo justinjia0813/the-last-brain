@@ -1,0 +1,9 @@
+{
+  "id": "the-last-brain",
+  "name": "The Last Brain",
+  "version": "0.1.0",
+  "minAppVersion": "1.11.4",
+  "description": "Read-only conversations with your vault, local chat history, and reviewed memories with sources.",
+  "author": "Justin Jia",
+  "isDesktopOnly": false
+}
